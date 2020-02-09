@@ -79,7 +79,7 @@ function mediawiki_login {
         log "Login" $username "Login successful: $LOGINSTATUS"
     else
         log "Login" $username "Login failed due to incorrect username and/or password: $LOGINSTATUS"
-        exit 133
+        exit 135
     fi
 }
 
@@ -281,13 +281,13 @@ function init {
     # Check that the log directory exists
     if [ ! -d "$LOGDIR" ]; then
         log "File System" $LOGDIR "Log directory doesn't exist. Check README.md for Installation instructions."
-        exit 129
+        exit 131
     fi
     
     # Check for write access
     if [ ! -w $LOGDIR ]; then
         log "File System" $LOGDIR "Insufficient write-privileges for log directory. Check README.md"
-        exit 130
+        exit 132
     fi
     
     #
@@ -306,7 +306,7 @@ function init {
             VALTMP=${VAL#\"}
             VAL=${VALTMP%\"}
             
-            # Error check - 132
+            # Error check - 133
             
             declare -r ${KEY}="$VAL"
         done < "$CFG"
@@ -314,7 +314,7 @@ function init {
         IFS=$OLDIFS
     else
         log "File System" "$CFG" 'The configuration file in your home directory does not exist. Check README.md for installation instructions and error/troubleshooting info.'
-        exit 131
+        exit 134
     fi
     
     #

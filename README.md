@@ -193,17 +193,17 @@ All actions are logged to three files in `/var/log/mwautopub/` folder:
 
 ### Exit Codes
 
-Custom exit codes are defined in the range starting at 129, as per the [Advanced Bash-Scripting Guide](http://tldp.org/LDP/abs/html/index.html) and ```usr/include/sysexits.h``` from the **C** language (as a best practice.)
+Custom exit codes are defined in the range starting at 131, as per the [Advanced Bash-Scripting Guide](http://tldp.org/LDP/abs/html/index.html) and ```usr/include/sysexits.h``` from the **C** language (as a best practice.)
 
 **Custom Exit codes**:
 
 | Exit Code |     Type      | Description                                                   |
 | :-------: | :-----------: | ------------------------------------------------------------- |
-|    129    |  File System  | The **log** directory doesn't exist.                          |
-|    130    |  File System  | Insufficient write-privilege for the **log** directory.       |
-|    131    |  File System  | ```.mwautopub``` does not exist in the user's home directory. |
-|    132    | Configuration | Missing or null parameter values in the configuration file.   |
-|    133    |     Login     | MediaWiki login failed with the supplied credentials.         |
+|    131    |  File System  | The **log** directory doesn't exist.                          |
+|    132    |  File System  | Insufficient write-privilege for the **log** directory.       |
+|    133    |  File System  | ```.mwautopub``` does not exist in the user's home directory. |
+|    134    | Configuration | Missing or null parameter values in the configuration file.   |
+|    135    |     Login     | MediaWiki login failed with the supplied credentials.         |
 
 ## Troubleshooting
 
