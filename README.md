@@ -82,7 +82,7 @@ sudo mkdir /var/log/mwautopub && chown $UID:$UID /var/log/mwautopub/
 
 #### .mwautopub
 
-Here is a sample configuration file to get you started. It contains only the bare minimum for a Technical Writer to get started using the tool to publish content. Be sure to check out the other features of `mwautpub` below, such as logging, proxy server support, debug/verbosity options, etc.
+Here is a sample configuration file to get you started. It contains only the bare minimum for a Technical Writer to get started using the tool to publish content. Be sure to check out the other features of `mwautopub` below, such as logging, proxy server support, debug/verbosity options, etc.
 
 ```bash
 username="Tex Murphy"
