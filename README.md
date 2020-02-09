@@ -238,7 +238,7 @@ proxy="192.168.0.1:8888"
 
 This tool assumes that your source documentation is being stored/backed up in some sort of repository, regardless of whether or not it's `git` or a `*.zip` file containing a folder of hundreds of documents. It will work well for you no matter what your process is, but the number of edits to individual articles on the MediaWiki system will get out of control with the use of any bot programs or automation tools. 
 
-Acting on the premise that it is more desirable to be using Visual Studio Code as your modern editor, and have background processes manage the storage and publishing of your articles automatically, it is recommend to create a `cron` job or some such thing to schedule MediaWiki's built-in PHP script to remove **all** old revisions.
+Acting on the premise that it is more desirable to be using Visual Studio Code as your modern editor, and have background processes manage the storage and publishing of your articles automatically, it is recommended to create a `cron` job or some such thing to schedule MediaWiki's built-in PHP script to remove **all** old revisions.
 
 From the base directory of your MediaWiki deployment:
 
