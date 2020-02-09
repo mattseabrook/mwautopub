@@ -1,0 +1,456 @@
+#!/bin/bash
+
+: '
+/*
+===============
+log
+
+This function handles custom event logging
+===============
+*/
+'
+function log {
+    declare -r TAB=$'\t'                                  # *.TSV format preferred (could be changed to *.CSV, etc.)
+    declare -r LOGDIR="/var/log/mwautopub"                # Directory to output the log files to
+    declare -r LOGTYPE="$1"                               # ($1) Type of log entry
+    declare -r LOGOBJECT="$2"                             # ($2) What are we logging?
+    declare -r TIMESTAMP=`date +"%Y-%m-%d %H:%M:%S"`      # Timestamp
+    declare -r TEXT="$3"                                  # Message to log
+    declare LOGFILE=null                                  # Filename of the log file
+    
+    #
+    # Decide which log file to write the entry into
+    #
+    case $LOGTYPE in
+        "File System")
+            LOGFILE="mwautopub.log"
+        ;;
+        "Login")
+            LOGFILE="mwlogin.log"
+        ;;
+        "Publish")
+            LOGFILE="mwedits.log"
+        ;;
+        *)
+            LOGFILE="mwautopub.log"
+        ;;
+    esac
+    
+    # Append the log entry
+    printf "$TIMESTAMP${TAB}$LOGTYPE${TAB}$LOGOBJECT${TAB}$TEXT\n" >> "$LOGDIR/$LOGFILE"
+}
+
+
+: '
+/*
+===============
+mediawiki_login
+
+This function creates and maintains the login session for MediaWiki
+===============
+*/
+'
+function mediawiki_login {
+    # Obtain the MediaWiki Login Token
+    declare -r LGTOKEN="$(http "action=query&meta=tokens&type=login&format=json")"
+    
+    # Workaround since MediaWiki supports UID with spaces, and cURL fails in Bash with spaces in certain switches
+    case ${username} in
+        *\ * )
+            URLENC_UID=$(echo "$username" | sed 's/ /%20/g')
+        ;;
+    esac
+    
+    # Create an associative array to store Query Parameters that must be URL encoded
+    declare -A DATA=(
+        ['loginreturnurl']="http://127.0.0.1:5000"
+        ['logintoken']=$(echo $LGTOKEN | jq --raw-output '.query.tokens.logintoken')
+        ['password']="$password"
+    )
+    
+    # Complete the MediaWiki login
+    declare -r CLIENTLOGINSTATUS=$(http "action=clientlogin&username=$URLENC_UID&format=json" DATA)
+    
+    # Parse the JSON return for the the login status
+    declare -r LOGINSTATUS=$(echo $CLIENTLOGINSTATUS | jq --raw-output '.clientlogin.status')
+    
+    # Check that the login was successful
+    if [ "$LOGINSTATUS" == "PASS" ]; then
+        log "Login" $username "Login successful: $LOGINSTATUS"
+    else
+        log "Login" $username "Login failed due to incorrect username and/or password: $LOGINSTATUS"
+        exit 133
+    fi
+}
+
+
+: '
+/*
+===============
+http
+
+cURL implementation
+===============
+*/
+'
+function http {
+    # Setup the Cookie Jar & HTTP logs
+    declare -r COOKIEFILE="/var/run/user/$UID/mwautopub/cookie.lwp"
+    declare -r HTTPLOG="/var/run/user/$UID/mwautopub/http.log"
+    
+    # The cURL command string
+    declare COMMAND
+    
+    # Check if verbose http logs are enabled
+    if [ -z ${verbosehttplogs+x} ]; then
+        COMMAND="curl"
+    else
+        COMMAND="curl --verbose"
+    fi
+    
+    # Set argument $1 as the body content
+    COMMAND="$COMMAND --cookie $COOKIEFILE --cookie-jar $COOKIEFILE --data $1"
+    
+    # Check if Query Params to URL encode were passed as the second argument
+    if [ ! -z "${2+x}" ]; then
+        local -n ARRAY=$2
+        
+        for PARAM in "${!ARRAY[@]}"
+        do
+            COMMAND="$COMMAND --data-urlencode $PARAM=${ARRAY[$PARAM]}"
+        done
+    fi
+    
+    # Check if there is an HTML pay-load passed as the third argument
+    if [ ! -z "${3+x}" ]; then
+        COMMAND="$COMMAND --data-urlencode "text@$3""
+    fi
+    
+    # Check if the proxy server is enabled for debugging
+    if [ ! -z ${proxy+x} ]; then
+        COMMAND="$COMMAND --proxy $proxy --insecure"
+    fi
+    
+    # Add the URL for Tx/Rx to the cURL command line
+    COMMAND="$COMMAND $site"
+    
+    RESULT=`$COMMAND 2> $HTTPLOG`
+    
+    echo $RESULT
+}
+
+
+: '
+/*
+===============
+mediawiki_monitor
+
+This function launches a recursive inotifywait command on the supplied path ($1)
+===============
+*/
+'
+function mediawiki_monitor {
+    # Workaround for 3rd-party programs that CLOSE_WRITE multiple times < 1 second
+    declare LAST_EVENT_TIME=`date +%s`
+    
+    inotifywait \
+    --monitor \
+    --recursive \
+    --event close_write \
+    --format "%w%f" \
+    --quiet \
+    "$1" | while read FILENAME
+    
+    do
+        # Check if the CLOSE_WRITE is being performed on a Markdown or HTML file
+        if [[ $FILENAME = *.md ]] || [[ $FILENAME = *.html ]]; then
+            # Get last modified time in seconds since Epoch
+            LASTMODIFIED=`stat $FILENAME --format %Y`
+            
+            # If it's been 30 minutes since the last commit, it's safe to say we're timed out of MediaWiki
+            [ "$LASTMODIFIED" -gt "$((LAST_EVENT_TIME + 1740))" ] && mediawiki_login
+            
+            # Check the last modified date of the file to make sure this isn't a duplicate inotifywait event
+            if [ "$LASTMODIFIED" -gt "$LAST_EVENT_TIME" ]; then
+                # Body of the page/article
+                declare POSTBODY=null
+                
+                # Obtain the MediaWiki CSRF Token
+                declare CSRFTOKEN="$(http "action=query&meta=tokens&format=json")"
+                
+                # Set the file to be the POST body of the HTTP request (and invoke cmark if it's a Markdown file)
+                if [[ $FILENAME = *.md ]]; then
+                    cmark-gfm \
+                    $FILENAME \
+                    --extension table \
+                    --table-prefer-style-attributes \
+                    --unsafe \
+                    --to html > ./$FILENAME.html
+                    
+                    POSTBODY=$FILENAME.html
+                else
+                    POSTBODY=$FILENAME
+                fi
+                
+                # Set the title of MediaWiki article to update (for now use the Directory name)
+                DIR=`dirname $FILENAME`
+                DIR=`basename $DIR`
+                
+                # Query Parameters that must be URL encoded
+                declare -A DATA=(
+                    ['title']=$DIR
+                    ['token']=$(echo $CSRFTOKEN | jq --raw-output '.query.tokens.csrftoken')
+                )
+                
+                # Complete the MediaWiki article edit
+                declare EDITARTICLE=$(http "action=edit&format=json" DATA $POSTBODY)
+                
+                # Write to the log file based on the HTTP return above
+                log "Publish" $DIR "Article/page updated successfully from local source: $FILENAME"
+            fi
+        fi
+        
+        # Set the new time for last event
+        LAST_EVENT_TIME=`date +%s`
+        
+        # Cleanup (lazy)
+        #rm -f $FILENAME.html
+    done
+}
+
+
+: '
+/*
+===============
+service
+
+This function provides an interface to toggle the status of the application
+===============
+*/
+'
+function service {
+    case $1 in
+        # Stop
+        stop)
+            # If the monitoring service is already running, stop it.
+            [ -e /proc/${MONITORPID} -a /proc/${MONITORPID}/exe ] && pkill -15 -P $MONITORPID
+            echo "mwautopub PID: $MONITORPID and child processes terminated successfully."
+            echo
+        ;;
+        # Service
+        status)
+            exit 0
+        ;;
+        # No arguments
+        "")
+            exit 0
+        ;;
+        *)
+            echo "ERROR: Invalid command line arguments/parameters: $@"
+            echo
+            echo "Usage: mwautopub {switch} {parameter}"
+            echo
+            cli_help
+        ;;
+    esac
+}
+
+: '
+/*
+===============
+init
+
+This function initializes the program
+===============
+*/
+'
+function init {
+    # configuration file (UNIX style *.CFG format)
+    declare -r CFG="$HOME/.mwautopub"
+    
+    #
+    # Check Pre-requisites
+    #
+    if [ ! -d "/var/run/user/$UID/mwautopub" ]; then
+        mkdir /var/run/user/$UID/mwautopub
+    fi
+    
+    # Directory to output the log files to
+    declare -r LOGDIR="/var/log/mwautopub"
+    
+    # Check that the log directory exists
+    if [ ! -d "$LOGDIR" ]; then
+        log "File System" $LOGDIR "Log directory doesn't exist. Check README.md for Installation instructions."
+        exit 129
+    fi
+    
+    # Check for write access
+    if [ ! -w $LOGDIR ]; then
+        log "File System" $LOGDIR "Insufficient write-privileges for log directory. Check README.md"
+        exit 130
+    fi
+    
+    #
+    # Open and parse the CFG file
+    #
+    if [ -f "$CFG" ]; then
+        # Store reset IFS afterwards
+        OLDIFS=$IFS
+        
+        # Delimiter
+        IFS="="
+        
+        while read -r KEY VAL
+        do
+            # Remove only the leading and trailing quotes
+            VALTMP=${VAL#\"}
+            VAL=${VALTMP%\"}
+            
+            # Error check - 132
+            
+            declare -r ${KEY}="$VAL"
+        done < "$CFG"
+        
+        IFS=$OLDIFS
+    else
+        log "File System" "$CFG" 'The configuration file in your home directory does not exist. Check README.md for installation instructions and error/troubleshooting info.'
+        exit 131
+    fi
+    
+    #
+    # Launch the activity that was specified by the user
+    #
+    case $1 in
+        "monitor")
+            echo "Launching MediaWiki monitoring service..."
+            
+            # Login to the MediaWiki instance
+            mediawiki_login
+            
+            # Launch MediaWiki monitoring service and send it to the background
+            mediawiki_monitor $2 &
+            
+            # Create PID file
+            echo $! >/var/run/user/$UID/mwautopub/pid
+        ;;
+    esac
+}
+
+
+: '
+/*
+================
+cli_interface
+
+Display CLI help text
+================
+*/
+'
+function cli_interface {
+    case $1 in
+        # Help
+        -h|-H|--h|--H|-help|--help)
+            cli_help
+        ;;
+        # Monitor
+        -m|-M|--m|--M|-monitor|--monitor)
+            init "monitor" $2
+        ;;
+        # Version
+        -v|-V|--v|--V|-version|--version)
+            cli_version
+        ;;
+        # Service
+        service)
+            service $2
+        ;;
+        # No arguments
+        "")
+            service
+        ;;
+        *)
+            echo "ERROR: Invalid command line arguments/parameters: $@"
+            echo
+            echo "Usage: mwautopub {switch} {parameter}"
+            echo
+            cli_help
+        ;;
+    esac
+}
+
+
+: '
+/*
+================
+cli_help
+
+Display CLI help text
+================
+*/
+'
+function cli_help {
+    echo -e "\t-m, -M, --m, --M, -monitor, --monitor\tStart the MediaWiki Autopublish service."
+    echo -e "\t-h, -H, --h, --H, -help, --help\t\tDisplay this screen."
+    echo -e "\t-v, -V, --v, --V, -version, --version\tDisplay version & miscaellaneous program information."
+    echo
+    echo -e "\tservice <command>\t\t\tstatus | stop"
+    echo
+}
+
+
+: '
+/*
+================
+cli_version
+
+Display CLI version info
+================
+*/
+'
+function cli_version {
+    echo -e "mwautopub 1.4"
+    echo -e "02/08/2020"
+    echo -e "Matthew Seabrook"
+    echo -e "info@mattseabrook.net"
+    echo
+}
+
+
+: '
+//==========================================================================
+
+/*
+================
+Main Entrypoint
+
+Upon execution of the shell script
+================
+*/
+'
+echo -e "\e[1m                _____     _       _____     _
+ _____ _ _ _   |  _  |_ _| |_ ___|  _  |_ _| |_
+|     | | | |  |     | | |  _| . |   __| | | . |
+|_|_|_|_____|  |__|__|___|_| |___|__|  |___|___|\e[0m"
+echo 'Publishing/Editing automation tools for MediaWiki'
+echo 'v.1.4 - 02/08/2020, Authored by: Matthew Seabrook ( info@mattseabrook.net )'
+echo
+
+# Status
+declare STATUS=null
+
+if [ -f "/var/run/user/$UID/mwautopub/pid" ]; then
+    declare -r MONITORPID=`cat /var/run/user/$UID/mwautopub/pid`
+    
+    STATUS="OFFLINE"
+    
+    [ -e /proc/${MONITORPID} -a /proc/${MONITORPID}/exe ] && STATUS="ONLINE"
+else
+    STATUS="OFFLINE"
+fi
+
+echo -e "\e[7mSTATUS:\e[0m $STATUS"
+echo
+
+cli_interface "$@"
+
+exit 0
