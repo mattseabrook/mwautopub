@@ -152,13 +152,12 @@ This function launches a recursive inotifywait command on the supplied path ($1)
 function mediawiki_monitor {
     # Workaround for 3rd-party programs that CLOSE_WRITE multiple times < 1 second
     declare LAST_EVENT_TIME=`date +%s`
-    
+    # --quiet \
     inotifywait \
     --monitor \
     --recursive \
     --event close_write \
     --format "%w%f" \
-    --quiet \
     "$1" | while read FILENAME
     
     do
