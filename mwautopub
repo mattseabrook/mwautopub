@@ -123,7 +123,7 @@ function http {
     
     # Check if there is an HTML pay-load passed as the third argument
     if [ ! -z "${3+x}" ]; then
-        COMMAND="$COMMAND --data-urlencode "text@$3""
+        COMMAND="$COMMAND --data-urlencode text@$3"
     fi
     
     # Check if the proxy server is enabled for debugging
@@ -134,6 +134,8 @@ function http {
     # Add the URL for Tx/Rx to the cURL command line
     COMMAND="$COMMAND $site"
     
+    echo $COMMAND > curl.txt
+    
     RESULT=`$COMMAND 2> $HTTPLOG`
     
     echo $RESULT
@@ -143,17 +145,18 @@ function http {
 : '
 /*
 ===============
-mediawiki_monitor
+testmon
 
-This function launches a recursive inotifywait command on the supplied path ($1)
+Re-writing the entire monitoring function
+
+@param      $1      string      Path that inotifywait should watch
 ===============
 */
 '
-function mediawiki_monitor {
-    # Workaround for 3rd-party programs that CLOSE_WRITE multiple times < 1 second
-    declare LAST_EVENT_TIME=`date +%s`
-    # --quiet \
+function testmon {
+    # Recursive inotifywait watch
     inotifywait \
+    --quiet \
     --monitor \
     --recursive \
     --event close_write \
@@ -161,16 +164,35 @@ function mediawiki_monitor {
     "$1" | while read FILENAME
     
     do
-        # Check if the CLOSE_WRITE is being performed on a Markdown or HTML file
-        if [[ $FILENAME = *.md ]] || [[ $FILENAME = *.html ]]; then
-            # Get last modified time in seconds since Epoch
-            LASTMODIFIED=`stat $FILENAME --format %Y`
+        # Add to document queue
+        echo "$FILENAME" >> /var/run/user/$UID/mwautopub/docqueue
+    done
+}
+
+
+: '
+/*
+===============
+docqueue
+
+Every (n) seconds, filter the $DOCUMENT_QUEUE for duplicates, and then POST to MediaWiki
+
+===============
+*/
+'
+function docqueue {
+    declare DOCQUEUE="/var/run/user/$UID/mwautopub/docqueue"
+    
+    while :
+    do
+        if [ -f $DOCQUEUE ]; then
+            QUEUE=`sort -u $DOCQUEUE`
             
-            # If it's been 30 minutes since the last commit, it's safe to say we're timed out of MediaWiki
-            [ "$LASTMODIFIED" -gt "$((LAST_EVENT_TIME + 1740))" ] && mediawiki_login
+            echo "$QUEUE" >> $DOCQUEUE.sorted
             
-            # Check the last modified date of the file to make sure this isn't a duplicate inotifywait event
-            if [ "$LASTMODIFIED" -gt "$LAST_EVENT_TIME" ]; then
+            while IFS= read -r FILE; do
+                #echo "$line"
+                
                 # Body of the page/article
                 declare POSTBODY=null
                 
@@ -178,22 +200,19 @@ function mediawiki_monitor {
                 declare CSRFTOKEN="$(http "action=query&meta=tokens&format=json")"
                 
                 # Set the file to be the POST body of the HTTP request (and invoke cmark if it's a Markdown file)
-                if [[ $FILENAME = *.md ]]; then
-                    cmark-gfm \
-                    $FILENAME \
-                    --extension table \
-                    --table-prefer-style-attributes \
-                    --unsafe \
-                    --to html > ./$FILENAME.html
-                    
-                    POSTBODY=$FILENAME.html
-                else
-                    POSTBODY=$FILENAME
-                fi
+                cmark-gfm \
+                "$FILE" \
+                --extension table \
+                --table-prefer-style-attributes \
+                --unsafe \
+                --to html > /var/run/user/$UID/mwautopub/tmp.html
+                
+                POSTBODY="/var/run/user/$UID/mwautopub/tmp.html"
                 
                 # Set the title of MediaWiki article to update (for now use the Directory name)
-                DIR=`dirname $FILENAME`
-                DIR=`basename $DIR`
+                DIR=`dirname "$FILE"`
+                DIR=`basename "$DIR"`
+                DIR=`echo $DIR | sed "s/ //g"`
                 
                 # Query Parameters that must be URL encoded
                 declare -A DATA=(
@@ -205,20 +224,21 @@ function mediawiki_monitor {
                 declare EDITARTICLE=$(http "action=edit&format=json" DATA $POSTBODY)
                 
                 # Write to the log file based on the HTTP return above
-                log "Publish" $DIR "Article/page updated successfully from local source: $FILENAME"
-            fi
+                log "Publish" "$DIR" "Article/page updated successfully from local source:" "$FILE"
+                
+                rm /var/run/user/$UID/mwautopub/tmp.html
+            done < "$DOCQUEUE.sorted"
+            
+            rm -rf $DOCQUEUE
+            rm -rf $DOCQUEUE.sorted
         fi
         
-        # Set the new time for last event
-        LAST_EVENT_TIME=`date +%s`
-        
-        # Cleanup (lazy)
-        #rm -f $FILENAME.html
+        sleep 5
     done
 }
-
-
 : '
+
+
 /*
 ===============
 service
@@ -228,21 +248,31 @@ This function provides an interface to toggle the status of the application
 */
 '
 function service {
+    if [ -f "/var/run/user/$UID/mwautopub/pid" ]; then
+        declare MONITORPID=`awk 'NR==1 {print; exit}' /var/run/user/$UID/mwautopub/pid`
+        declare DOCQUEUEPID=`awk 'NR==2 {print; exit}' /var/run/user/$UID/mwautopub/pid`
+    fi
+    
     case $1 in
-        # Stop
+        # Stop the Service from running
         stop)
             # If the monitoring service is already running, stop it.
-            [ -e /proc/${MONITORPID} -a /proc/${MONITORPID}/exe ] && pkill -15 -P $MONITORPID
-            echo "mwautopub PID: $MONITORPID and child processes terminated successfully."
+            [ -e /proc/${MONITORPID} -a /proc/${MONITORPID}/exe ] && pkill --signal 9 --parent $MONITORPID
+            echo "[mwautopub] Monitoring Process PID: $MONITORPID + child processes terminated successfully!"
+            
+            # kill -9 $DOCQUEUEPID
+            [ -e /proc/${DOCQUEUEPID} -a /proc/${DOCQUEUEPID}/exe ] && kill -9 $DOCQUEUEPID
+            echo "[mwautopub] Document Queue PID: $DOCQUEUEPID + child processes terminated successfully!"
+            
             echo
         ;;
-        # Service
+        # Service Status
         status)
-            exit 0
+            status
         ;;
         # No arguments
         "")
-            exit 0
+            status
         ;;
         *)
             echo "ERROR: Invalid command line arguments/parameters: $@"
@@ -253,6 +283,30 @@ function service {
         ;;
     esac
 }
+
+
+: '
+/*
+===============
+status
+
+x
+===============
+*/
+'
+function status {
+    declare STATUS="\033[0;31mOFFLINE\033[0m"
+    
+    if [ -f "/var/run/user/$UID/mwautopub/pid" ]; then
+        if [ -e /proc/${MONITORPID} -a /proc/${MONITORPID}/exe ] && [ -e /proc/${DOCQUEUEPID} -a /proc/${DOCQUEUEPID}/exe ]; then
+            STATUS="\033[0;32mONLINE\033[0m"
+        fi
+    fi
+    
+    echo -e "\e[7mSTATUS:\e[0m $STATUS"
+    echo
+}
+
 
 : '
 /*
@@ -332,6 +386,23 @@ function init {
             # Create PID file
             echo $! >/var/run/user/$UID/mwautopub/pid
         ;;
+        "test")
+            echo "Launching MediaWiki monitoring service for local document repository: $2"
+            echo
+            
+            # Login to the MediaWiki instance
+            mediawiki_login
+            
+            # ... and send it to the background
+            testmon $2 &
+            
+            # Create PID file
+            echo $! >/var/run/user/$UID/mwautopub/pid
+            
+            # Process the queue in the background and add it to the PID file
+            docqueue &
+            echo $! >>/var/run/user/$UID/mwautopub/pid
+        ;;
     esac
 }
 
@@ -362,6 +433,10 @@ function cli_interface {
         # Service
         service)
             service $2
+        ;;
+        # Testing
+        -t|--t|-T|--T|-test|--test)
+            init "test" $2
         ;;
         # No arguments
         "")
@@ -407,10 +482,10 @@ Display CLI version info
 */
 '
 function cli_version {
-    echo -e "mwautopub 1.4"
-    echo -e "02/08/2020"
-    echo -e "Matthew Seabrook"
-    echo -e "info@mattseabrook.net"
+    echo "mwautopub 1.5"
+    echo "08/26/2020"
+    echo "Matthew Seabrook"
+    echo "info@mattseabrook.net"
     echo
 }
 
@@ -426,28 +501,12 @@ Upon execution of the shell script
 ================
 */
 '
-echo -e "\e[1m                _____     _       _____     _
+echo -e "\033[1;97m                _____     _       _____     _
  _____ _ _ _   |  _  |_ _| |_ ___|  _  |_ _| |_
 |     | | | |  |     | | |  _| . |   __| | | . |
 |_|_|_|_____|  |__|__|___|_| |___|__|  |___|___|\e[0m"
 echo 'Publishing/Editing automation tools for MediaWiki'
-echo 'v.1.4 - 02/08/2020, Authored by: Matthew Seabrook ( info@mattseabrook.net )'
-echo
-
-# Status
-declare STATUS=null
-
-if [ -f "/var/run/user/$UID/mwautopub/pid" ]; then
-    declare -r MONITORPID=`cat /var/run/user/$UID/mwautopub/pid`
-    
-    STATUS="OFFLINE"
-    
-    [ -e /proc/${MONITORPID} -a /proc/${MONITORPID}/exe ] && STATUS="ONLINE"
-else
-    STATUS="OFFLINE"
-fi
-
-echo -e "\e[7mSTATUS:\e[0m $STATUS"
+echo 'v.1.5 - 08/26/2020, Authored by: Matthew Seabrook ( info@mattseabrook.net )'
 echo
 
 cli_interface "$@"
